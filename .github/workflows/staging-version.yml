@@ -1,0 +1,72 @@
+# Version every merge into `staging` as the next PATCH.
+#
+# The versioning policy (owner decision, 2026-10-04): a merge into staging is a
+# patch (x.y.z -> x.y.z+1), the staging -> main release is a minor
+# (x.y+1.0), and a major is only released by hand (run this with
+# bump: major). Each segment holds 0..999.
+#
+# nyuchiGOV is kept apart from the rest of the estate, so this is a
+# self-contained copy of the org's shared staging workflow, using the
+# vendored scripts/next-version.mjs. The tag is pushed with GITHUB_TOKEN, so
+# no tag-triggered release runs for a beta build, and nothing is committed
+# back to staging.
+
+name: Staging version
+
+on:
+  push:
+    branches: [staging]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Override the patch bump (major is manual only).
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+permissions:
+  contents: read
+
+jobs:
+  tag:
+    name: Tag the next patch
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: version-tag
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Tag the next patch and make a pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUMP: ${{ inputs.bump || '' }}
+          MANUAL: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          set -euo pipefail
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GH_REPO}.git"
+          refs="$(git ls-remote --tags "$remote" 'refs/tags/v*')"
+          head="$(git rev-parse HEAD)"
+          # A re-run, or a commit that already has a version: tag nothing.
+          if printf '%s\n' "$refs" | awk -v h="$head" '$1 == h' | grep -q .; then
+            echo "$head already carries a version tag; nothing to tag."
+            exit 0
+          fi
+          current="$(printf '%s\n' "$refs" | node scripts/next-version.mjs highest --prefix v)"
+          version="$(node scripts/next-version.mjs next --current "$current" \
+            --channel staging --bump "$BUMP" --manual "$MANUAL")"
+          tag="v$version"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "$tag (staging)"
+          git push "$remote" "refs/tags/$tag"
+          echo "Pushed $tag at $head ($current -> $version)." | tee -a "$GITHUB_STEP_SUMMARY"
+          gh release create "$tag" --verify-tag --prerelease --latest=false \
+            --title "$tag (beta)" --generate-notes
